@@ -1,0 +1,169 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>PDF Field Mapping</title>
+  <style>
+    body { font-family: Arial, sans-serif; }
+    #pdf-container { position: relative; display: inline-block; }
+    .highlight-box {
+      position: absolute;
+      border: 2px solid red;
+      background-color: rgba(255,0,0,0.2);
+      pointer-events: none;
+    }
+  </style>
+</head>
+<body>
+  <h2>PDF Field Mapping Tool</h2>
+
+  <!-- Upload PDF -->
+  <input type="file" id="pdfInput" />
+  <button onclick="uploadPdf()">Upload PDF</button>
+  <br><br>
+
+  <!-- Save annotations -->
+  <button onclick="saveAnnotations()">Save Annotations</button>
+
+  <!-- Fetch annotations -->
+  <button onclick="fetchAnnotations()">Fetch Annotations</button>
+  <br><br>
+
+  <div id="pdf-container"></div>
+
+  <!-- PDF.js -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/2.16.105/pdf.min.js"></script>
+  <script>
+    let pdfDoc = null;
+    let scale = 1.2;
+    let processId = null;
+    let annotations = [];
+
+    // Upload PDF to backend
+    async function uploadPdf() {
+      const file = document.getElementById("pdfInput").files[0];
+      if (!file) { alert("Choose a file!"); return; }
+
+      const formData = new FormData();
+      formData.append("pdf", file);
+
+      const res = await fetch("/upload", { method: "POST", body: formData });
+      const data = await res.json();
+      processId = data.process;
+      alert("Uploaded! Process ID = " + processId);
+
+      loadPdf(data.url);
+    }
+
+    // Load PDF into viewer
+    function loadPdf(url) {
+      pdfjsLib.getDocument(url).promise.then(function(pdf) {
+        pdfDoc = pdf;
+        document.getElementById("pdf-container").innerHTML = ""; // clear old
+        for (let i = 1; i <= pdf.numPages; i++) {
+          renderPage(i);
+        }
+      });
+    }
+
+    // Render page with overlay
+    function renderPage(num) {
+      pdfDoc.getPage(num).then(function(page) {
+        const viewport = page.getViewport({ scale });
+        const canvas = document.createElement("canvas");
+        const ctx = canvas.getContext("2d");
+        canvas.width = viewport.width;
+        canvas.height = viewport.height;
+
+        // Wrap each page in a container (canvas + overlay)
+        const container = document.createElement("div");
+        container.style.position = "relative";
+        container.appendChild(canvas);
+        document.getElementById("pdf-container").appendChild(container);
+
+        page.render({ canvasContext: ctx, viewport });
+
+        // Enable drawing boxes
+        let startX, startY, isDrawing = false;
+
+        canvas.addEventListener("mousedown", (e) => {
+          isDrawing = true;
+          const rect = canvas.getBoundingClientRect();
+          startX = e.clientX - rect.left;
+          startY = e.clientY - rect.top;
+        });
+
+        canvas.addEventListener("mouseup", (e) => {
+          if (!isDrawing) return;
+          isDrawing = false;
+          const rect = canvas.getBoundingClientRect();
+          const endX = e.clientX - rect.left;
+          const endY = e.clientY - rect.top;
+
+          // Draw highlight box
+          const div = document.createElement("div");
+          div.className = "highlight-box";
+          div.style.left = Math.min(startX, endX) + "px";
+          div.style.top = Math.min(startY, endY) + "px";
+          div.style.width = Math.abs(endX - startX) + "px";
+          div.style.height = Math.abs(endY - startY) + "px";
+          container.appendChild(div);
+
+          // Save annotation
+          annotations.push({
+            process: processId,
+            formId: 20,
+            fieldId: Date.now(),
+            fieldName: "Field_" + Date.now(),
+            fieldHeader: "Header",
+            bboxJson: JSON.stringify([startX, startY, endX, endY]),
+            page: num,
+            scale: scale,
+            fieldType: "CharField",
+            metadataJson: "{}"
+          });
+        });
+      });
+    }
+
+    // Save annotations
+    async function saveAnnotations() {
+      if (!processId) { alert("Upload PDF first!"); return; }
+      const res = await fetch("/api/pdf-annotation-mappings/bulk/", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(annotations)
+      });
+      const data = await res.json();
+      alert("Saved: " + JSON.stringify(data));
+    }
+
+    // Fetch annotations and redraw
+    async function fetchAnnotations() {
+      if (!processId) { alert("Upload PDF first!"); return; }
+      const res = await fetch("/app_admin/api/fetch-create-table/", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ process: processId, formId: 20 })
+      });
+      const data = await res.json();
+      console.log("Fetched annotations:", data);
+
+      // Redraw boxes
+      data.forEach(a => {
+        const pageContainers = document.querySelectorAll("#pdf-container > div");
+        const container = pageContainers[a.page - 1];
+        if (!container) return;
+
+        const div = document.createElement("div");
+        div.className = "highlight-box";
+        const [x1,y1,x2,y2] = JSON.parse(a.bboxJson || a.bbox);
+        div.style.left = Math.min(x1, x2) + "px";
+        div.style.top = Math.min(y1, y2) + "px";
+        div.style.width = Math.abs(x2 - x1) + "px";
+        div.style.height = Math.abs(y2 - y1) + "px";
+        container.appendChild(div);
+      });
+    }
+  </script>
+</body>
+</html>
